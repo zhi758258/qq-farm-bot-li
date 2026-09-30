@@ -10,14 +10,25 @@ const store = require('../../models/store');
 const { addOrUpdateAccount, deleteAccount } = store;
 const { findAccountByRef } = require('../../services/account-resolver');
 const { updateRuntimeConfig, getRuntimeConfig, getDefaultSystemConfig, getDevicePresets, getTimeZoneOptions } = require('../../config/config');
+const userStore = require('../../models/user-store');
 
 const {
     getAccId,
     getAccountIds,
     handleApiError,
     getAccountList,
+    getRequestSession,
     resolveAccId,
 } = require('./middleware');
+
+function filterAccountsPayload(ctx: AdminContext, req: Request, data: any): any {
+    const accounts = getAccountList(ctx, req);
+    return {
+        ...(data && typeof data === 'object' ? data : {}),
+        accounts,
+        nextId: data?.nextId,
+    };
+}
 
 function mountAccountRoutes(app: Application, ctx: AdminContext): void {
 
@@ -25,7 +36,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
     app.get('/api/accounts', (req: Request, res: Response) => {
         try {
             const data = ctx.provider.getAccounts();
-            res.json({ ok: true, data });
+            res.json({ ok: true, data: filterAccountsPayload(ctx, req, data) });
         } catch (e: any) {
             handleApiError(res, e);
         }
@@ -36,7 +47,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         try {
             const body = (req.body && typeof req.body === 'object') ? req.body : {};
             const rawRef = body.id || body.accountId || body.uin || req.headers['x-account-id'];
-            const accountList = getAccountList(ctx);
+            const accountList = getAccountList(ctx, req);
             const target = findAccountByRef(accountList, rawRef);
             if (!target || !target.id) {
                 return res.status(404).json({ ok: false, error: 'Account not found' });
@@ -55,7 +66,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             if (ctx.provider && ctx.provider.addAccountLog) {
                 ctx.provider.addAccountLog('update', `更新账号备注: ${remark}`, accountId, remark);
             }
-            res.json({ ok: true, data });
+            res.json({ ok: true, data: filterAccountsPayload(ctx, req, data) });
         } catch (e: any) {
             handleApiError(res, e);
         }
@@ -69,7 +80,9 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             if (!requestedName) {
                 return res.status(400).json({ ok: false, error: '账号备注不能为空' });
             }
-            const visibleAccounts = getAccountList(ctx);
+            const session = getRequestSession(req);
+            if (!session) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+            const visibleAccounts = getAccountList(ctx, req);
             const remarkMatchedAccount = !body.id && requestedName
                 ? visibleAccounts.find((account: any) => String(account.name || '').trim() === requestedName)
                 : null;
@@ -77,8 +90,19 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             const updateRef = body.id || (remarkMatchedAccount && remarkMatchedAccount.id) || '';
             const isUpdate = !!updateRef;
 
-            const resolvedUpdateId = isUpdate ? resolveAccId(ctx, updateRef) : '';
-            const payload = isUpdate ? { ...body, id: resolvedUpdateId || String(updateRef) } : body;
+            const resolvedUpdateId = isUpdate ? resolveAccId(ctx, updateRef, req) : '';
+            if (isUpdate && !resolvedUpdateId) {
+                return res.status(404).json({ ok: false, error: 'Account not found' });
+            }
+            if (!isUpdate) {
+                const quotaCheck = userStore.canAddGameAccount(session.userId, session.role);
+                if (!quotaCheck.ok) {
+                    return res.status(403).json({ ok: false, error: quotaCheck.error });
+                }
+            }
+            const payload = isUpdate
+                ? { ...body, id: resolvedUpdateId || String(updateRef) }
+                : { ...body, ownerId: session.userId };
             let wasRunning = false;
             if (isUpdate && ctx.provider.isAccountRunning) {
                 wasRunning = ctx.provider.isAccountRunning(payload.id);
@@ -123,7 +147,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
                 // 如果是更新，且之前在运行，且不是仅修改备注，则重启
                 ctx.provider.restartAccount(payload.id);
             }
-            res.json({ ok: true, data });
+            res.json({ ok: true, data: filterAccountsPayload(ctx, req, data) });
         } catch (e: any) {
             handleApiError(res, e);
         }
@@ -131,16 +155,19 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
 
     app.delete('/api/accounts/:id', (req: Request, res: Response) => {
         try {
-            const resolvedId = resolveAccId(ctx, req.params.id) || String(req.params.id || '');
+            const resolvedId = resolveAccId(ctx, req.params.id, req);
+            if (!resolvedId) {
+                return res.status(404).json({ ok: false, error: 'Account not found' });
+            }
 
-            const before = ctx.provider.getAccounts();
-            const target = findAccountByRef(before.accounts || [], req.params.id);
+            const before = getAccountList(ctx, req);
+            const target = findAccountByRef(before, req.params.id);
             ctx.provider.stopAccount(resolvedId);
             const data = deleteAccount(resolvedId);
             if (ctx.provider.addAccountLog) {
                 ctx.provider.addAccountLog('delete', `删除账号: ${(target && target.name) || req.params.id}`, resolvedId, target ? target.name : '');
             }
-            res.json({ ok: true, data });
+            res.json({ ok: true, data: filterAccountsPayload(ctx, req, data) });
         } catch (e: any) {
             handleApiError(res, e);
         }
@@ -152,6 +179,11 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             const limit = Number.parseInt(req.query.limit as string) || 100;
             let list: any[] = ctx.provider.getAccountLogs ? ctx.provider.getAccountLogs(limit) : [];
             if (!Array.isArray(list)) list = [];
+            const session = getRequestSession(req);
+            if (session && session.role !== 'admin') {
+                const owned = new Set(getAccountIds(ctx, req));
+                list = list.filter((entry: any) => owned.has(String(entry.accountId || '')));
+            }
 
             // 与当前 web 前端保持一致：直接返回数组
             res.json(list);
@@ -163,10 +195,13 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
     // API: 日志
     app.get('/api/logs', (req: Request, res: Response) => {
         const queryAccountIdRaw = (req.query.accountId || '').toString().trim();
-        const id = queryAccountIdRaw ? (queryAccountIdRaw === 'all' ? '' : resolveAccId(ctx, queryAccountIdRaw)) : getAccId(ctx, req);
-        // 如果没有指定账号ID，获取所有账号的日志
-        if (!id) {
-            const accountIds = getAccountIds(ctx);
+            const id = queryAccountIdRaw ? (queryAccountIdRaw === 'all' ? '' : resolveAccId(ctx, queryAccountIdRaw, req)) : getAccId(ctx, req);
+            if (queryAccountIdRaw && queryAccountIdRaw !== 'all' && !id) {
+                return res.status(404).json({ ok: false, error: 'Account not found' });
+            }
+            // 如果没有指定账号ID，获取所有账号的日志
+            if (!id) {
+                const accountIds = getAccountIds(ctx, req);
             const allLogs: any[] = [];
             const options = {
                 limit: Number.parseInt(req.query.limit as string) || 100,

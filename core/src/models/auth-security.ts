@@ -41,7 +41,7 @@ function loadLoginAttempts(): void {
         const source = raw && typeof raw === 'object' ? raw : {};
         loginAttempts = {};
         for (const [key, value] of Object.entries(source)) {
-            if ((key === ADMIN_ATTEMPT_KEY || key.startsWith('ip:')) && value && typeof value === 'object') {
+            if ((key === ADMIN_ATTEMPT_KEY || key.startsWith('ip:') || key.startsWith('user:')) && value && typeof value === 'object') {
                 loginAttempts[key] = value as LoginAttempt;
             }
         }
@@ -96,9 +96,19 @@ function checkRateLimit(ip: string): { allowed: boolean; remainingMs?: number; m
     return { allowed: true };
 }
 
+function attemptKey(username: string = ''): string {
+    const name = String(username || '').trim();
+    if (!name || name === ADMIN_ATTEMPT_KEY) return ADMIN_ATTEMPT_KEY;
+    return `user:${name}`;
+}
+
 function checkAdminLockout(): { locked: boolean; remainingMs?: number; message?: string } {
+    return checkUserLockout(ADMIN_ATTEMPT_KEY);
+}
+
+function checkUserLockout(username: string = ADMIN_ATTEMPT_KEY): { locked: boolean; remainingMs?: number; message?: string } {
     cleanExpiredAttempts();
-    const attempt = loginAttempts[ADMIN_ATTEMPT_KEY];
+    const attempt = loginAttempts[attemptKey(username)];
     const now = Date.now();
     if (attempt?.lockedUntil && attempt.lockedUntil > now) {
         const remainingMs = attempt.lockedUntil - now;
@@ -107,12 +117,13 @@ function checkAdminLockout(): { locked: boolean; remainingMs?: number; message?:
     return { locked: false };
 }
 
-function recordFailedAttempt(): { locked: boolean; message?: string; remainingAttempts?: number } {
+function recordFailedAttempt(username: string = ADMIN_ATTEMPT_KEY): { locked: boolean; message?: string; remainingAttempts?: number } {
     const now = Date.now();
-    const attempt = loginAttempts[ADMIN_ATTEMPT_KEY] || { count: 0, firstAttempt: now };
+    const key = attemptKey(username);
+    const attempt = loginAttempts[key] || { count: 0, firstAttempt: now };
     attempt.count++;
     attempt.lastAttempt = now;
-    loginAttempts[ADMIN_ATTEMPT_KEY] = attempt;
+    loginAttempts[key] = attempt;
     if (attempt.count >= MAX_LOGIN_ATTEMPTS) {
         attempt.lockedUntil = now + LOCKOUT_DURATION;
         saveLoginAttempts();
@@ -122,9 +133,10 @@ function recordFailedAttempt(): { locked: boolean; message?: string; remainingAt
     return { locked: false, remainingAttempts: MAX_LOGIN_ATTEMPTS - attempt.count };
 }
 
-function clearFailedAttempts(): void {
-    if (loginAttempts[ADMIN_ATTEMPT_KEY]) {
-        delete loginAttempts[ADMIN_ATTEMPT_KEY];
+function clearFailedAttempts(username: string = ADMIN_ATTEMPT_KEY): void {
+    const key = attemptKey(username);
+    if (loginAttempts[key]) {
+        delete loginAttempts[key];
         saveLoginAttempts();
     }
 }
@@ -168,6 +180,7 @@ module.exports = {
     loadLoginAttempts,
     checkRateLimit,
     checkAdminLockout,
+    checkUserLockout,
     recordFailedAttempt,
     clearFailedAttempts,
     validatePasswordStrength,

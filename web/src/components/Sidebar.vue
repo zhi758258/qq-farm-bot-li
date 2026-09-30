@@ -373,7 +373,7 @@ async function copyToken() {
               style="--focus-ring: var(--theme-primary)"
               aria-haspopup="menu"
               :aria-expanded="showUserDropdown"
-              :aria-label="isSidebarCollapsed ? `管理员：${userStore.username || '未登录'}` : undefined"
+              :aria-label="isSidebarCollapsed ? `${userStore.roleLabel}：${userStore.username || '未登录'}` : undefined"
               @click="toggleUserDropdown"
             >
               <div class="flex items-center gap-3 overflow-hidden">
@@ -397,8 +397,11 @@ async function copyToken() {
                     <span
                       class="admin-badge rounded-lg px-1.5 py-0.2 text-[10px] font-medium leading-tight"
                     >
-                      超级管理员
+                      {{ userStore.roleLabel }}
                     </span>
+                  </div>
+                  <div v-show="!isSidebarCollapsed" class="mt-0.5 text-[10px] text-gray-500 dark:text-gray-400">
+                    额度 {{ userStore.quotaLabel }}
                   </div>
                 </div>
               </div>
@@ -411,7 +414,7 @@ async function copyToken() {
           </template>
           <div class="sidebar-tooltip-content">
             <strong>{{ userStore.username || '未登录' }}</strong>
-            <span>超级管理员 · 点击查看账户菜单</span>
+            <span>{{ userStore.roleLabel }} · 额度 {{ userStore.quotaLabel }}</span>
           </div>
         </NTooltip>
 
@@ -425,7 +428,7 @@ async function copyToken() {
               {{ userStore.username }}
             </div>
             <div class="text-xs text-gray-500 dark:text-gray-400">
-              超级管理员
+              {{ userStore.roleLabel }} · 额度 {{ userStore.quotaLabel }}
             </div>
           </div>
           <div class="py-1">

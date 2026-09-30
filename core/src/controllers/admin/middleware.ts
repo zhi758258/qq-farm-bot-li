@@ -1,5 +1,5 @@
 import type { NextFunction, Request, Response } from 'express';
-import type { AdminContext } from './context';
+import type { AdminContext, Session } from './context';
 export {};
 
 const crypto = require('node:crypto');
@@ -8,6 +8,7 @@ const { normalizeAccountRef, resolveAccountId } = require('../../services/accoun
 
 interface AuthenticatedRequest extends Request {
     adminToken?: string;
+    auth?: Session;
 }
 
 function getClientIp(req: Request): string {
@@ -26,19 +27,52 @@ function getClientIp(req: Request): string {
 
 const issueToken = (): string => crypto.randomBytes(24).toString('hex');
 
+function getRequestSession(req: Request): Session | null {
+    return (req as AuthenticatedRequest).auth || null;
+}
+
 function createAuthRequired(ctx: AdminContext) {
     return (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
         const token = String(req.headers['x-admin-token'] || '');
-        if (!token || !ctx.tokens.has(token)) {
+        const session = token ? ctx.tokens.get(token) : null;
+        if (!token || !session) {
             res.status(401).json({ ok: false, error: 'Unauthorized' });
             return;
         }
         req.adminToken = token;
+        req.auth = session;
         next();
     };
 }
 
-function getAccountList(ctx: AdminContext): any[] {
+function createAdminRequired() {
+    return (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
+        if (!req.auth || req.auth.role !== 'admin') {
+            res.status(403).json({ ok: false, error: '无权限' });
+            return;
+        }
+        next();
+    };
+}
+
+function revokeUserSessions(ctx: AdminContext, userId: string): void {
+    const id = String(userId || '');
+    for (const [token, session] of ctx.tokens.entries()) {
+        if (session.userId === id) ctx.tokens.delete(token);
+    }
+}
+
+function accountOwnerId(account: any): string {
+    return String(account?.ownerId || 'admin').trim() || 'admin';
+}
+
+function canAccessAccount(session: Session | null | undefined, account: any): boolean {
+    if (!session) return false;
+    if (session.role === 'admin') return true;
+    return accountOwnerId(account) === session.userId;
+}
+
+function getAllAccounts(ctx: AdminContext): any[] {
     try {
         if (ctx.provider && typeof ctx.provider.getAccounts === 'function') {
             const data = ctx.provider.getAccounts();
@@ -51,8 +85,15 @@ function getAccountList(ctx: AdminContext): any[] {
     return Array.isArray(data.accounts) ? data.accounts : [];
 }
 
-function getAccountIds(ctx: AdminContext): string[] {
-    return getAccountList(ctx).map((account: any) => String(account.id || '')).filter(Boolean);
+function getAccountList(ctx: AdminContext, req?: Request): any[] {
+    const accounts = getAllAccounts(ctx);
+    const session = req ? getRequestSession(req) : null;
+    if (!session || session.role === 'admin') return accounts;
+    return accounts.filter(account => canAccessAccount(session, account));
+}
+
+function getAccountIds(ctx: AdminContext, req?: Request): string[] {
+    return getAccountList(ctx, req).map((account: any) => String(account.id || '')).filter(Boolean);
 }
 
 const isSoftRuntimeError = (err: any): boolean => {
@@ -65,7 +106,7 @@ function isGatewayProtocolError(err: any): boolean {
     return String(err?.name || '') === 'GatewayError'
         || typeof err?.errorMessage === 'string'
         || typeof err?.error_message === 'string'
-        || /^(?:[\w-]+\.)+[\w-]+(?:\s+.*?)?\bcode=\d+(?:\s|$)/.test(message);
+        || /^(?:[\w-]+\.)+[\w-]+(?:\s+(?:\S.*?)??)?\bcode=\d+(?:\s|$)/.test(message);
 }
 
 function getProtocolErrorMessage(err: any): string {
@@ -93,18 +134,22 @@ function handleApiError(res: Response, err: any): void {
     res.status(500).json(payload);
 }
 
-function resolveAccId(ctx: AdminContext, rawRef: any): string {
+function resolveAccId(ctx: AdminContext, rawRef: any, req?: Request): string {
     const input = normalizeAccountRef(rawRef);
     if (!input) return '';
+    const visible = getAccountList(ctx, req);
     if (ctx.provider && typeof ctx.provider.resolveAccountId === 'function') {
         const resolvedByProvider = normalizeAccountRef(ctx.provider.resolveAccountId(input));
-        if (resolvedByProvider) return resolvedByProvider;
+        if (resolvedByProvider) {
+            const owned = visible.find((account: any) => String(account.id || '') === resolvedByProvider);
+            return owned ? resolvedByProvider : '';
+        }
     }
-    return resolveAccountId(getAccountList(ctx), input) || input;
+    return resolveAccountId(visible, input) || '';
 }
 
 function getAccId(ctx: AdminContext, req: Request): string {
-    return resolveAccId(ctx, req.headers['x-account-id']);
+    return resolveAccId(ctx, req.headers['x-account-id'], req);
 }
 
 function buildKnownFriendGidSettings(accountId: string): {
@@ -127,6 +172,11 @@ module.exports = {
     getClientIp,
     issueToken,
     createAuthRequired,
+    createAdminRequired,
+    revokeUserSessions,
+    getRequestSession,
+    canAccessAccount,
+    getAllAccounts,
     getAccountList,
     getAccountIds,
     isSoftRuntimeError,

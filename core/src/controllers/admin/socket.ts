@@ -1,7 +1,7 @@
 /**
  * Socket.IO setup and realtime emit functions.
  */
-import type { AdminContext } from './context';
+import type { AdminContext, Session } from './context';
 export {};
 
 const { Server } = require('socket.io');
@@ -9,18 +9,30 @@ const SocketIOServer = Server;
 
 const {
     resolveAccId,
+    getAccountIds,
 } = require('./middleware');
 
+function sessionReq(session: Session | null | undefined) {
+    return { auth: session || undefined } as any;
+}
+
 function applySocketSubscription(ctx: AdminContext, socket: any, accountRef: string = ''): void {
+    const session: Session | undefined = socket.data.session;
+    const req = sessionReq(session);
     const incoming = String(accountRef || '').trim();
-    const resolved = incoming && incoming !== 'all' ? resolveAccId(ctx, incoming) : '';
+    const resolved = incoming && incoming !== 'all' ? resolveAccId(ctx, incoming, req) : '';
+    const ownedIds: string[] = getAccountIds(ctx, req);
 
     for (const room of socket.rooms) {
         if (room.startsWith('account:')) socket.leave(room);
     }
+
     if (resolved) {
         socket.join(`account:${resolved}`);
         socket.data.accountId = resolved;
+    } else if (session && session.role !== 'admin') {
+        for (const id of ownedIds) socket.join(`account:${id}`);
+        socket.data.accountId = '';
     } else {
         socket.join('account:all');
         socket.data.accountId = '';
@@ -34,7 +46,18 @@ function applySocketSubscription(ctx: AdminContext, socket: any, accountRef: str
             socket.emit('status:update', { accountId: targetId, status: currentStatus });
         }
         if (ctx.provider && typeof ctx.provider.getLogs === 'function') {
-            let currentLogs: any[] = ctx.provider.getLogs(targetId, { limit: 100 });
+            let currentLogs: any[] = [];
+            if (targetId) {
+                currentLogs = ctx.provider.getLogs(targetId, { limit: 100 });
+            } else {
+                const ids = ownedIds;
+                for (const id of ids) {
+                    const logs = ctx.provider.getLogs(id, { limit: 100 });
+                    if (Array.isArray(logs)) currentLogs.push(...logs);
+                }
+                currentLogs.sort((a: any, b: any) => (b.time || 0) - (a.time || 0));
+                currentLogs = currentLogs.slice(0, 100);
+            }
             if (!Array.isArray(currentLogs)) currentLogs = [];
 
             socket.emit('logs:snapshot', {
@@ -45,6 +68,10 @@ function applySocketSubscription(ctx: AdminContext, socket: any, accountRef: str
         if (ctx.provider && typeof ctx.provider.getAccountLogs === 'function') {
             let currentAccountLogs: any[] = ctx.provider.getAccountLogs(100);
             if (!Array.isArray(currentAccountLogs)) currentAccountLogs = [];
+            if (session && session.role !== 'admin') {
+                const owned = new Set(ownedIds);
+                currentAccountLogs = currentAccountLogs.filter((entry: any) => owned.has(String(entry.accountId || '')));
+            }
 
             socket.emit('account-logs:snapshot', {
                 logs: currentAccountLogs,
@@ -73,10 +100,12 @@ function setupSocketIO(ctx: AdminContext): void {
             ? String(socket.handshake.headers['x-admin-token'])
             : '';
         const token = authToken || headerToken;
-        if (!token || !ctx.tokens.has(token)) {
+        const session = token ? ctx.tokens.get(token) : null;
+        if (!token || !session) {
             return next(new Error('Unauthorized'));
         }
         socket.data.adminToken = token;
+        socket.data.session = session;
         return next();
     });
 

@@ -10,13 +10,16 @@ declare const __APP_VERSION__: string
 const userStore = useUserStore()
 const appVersion = __APP_VERSION__
 const gameVersion = ref('')
+const mode = ref<'login' | 'register'>('login')
 const username = ref('')
 const password = ref('')
+const confirmPassword = ref('')
 const error = ref('')
 const success = ref('')
 const loading = ref(false)
 const lockoutRemaining = ref(0)
 const rateLimitRemaining = ref(0)
+const isRegister = computed(() => mode.value === 'register')
 
 const usernameValid = computed(() => {
   const name = username.value
@@ -40,8 +43,12 @@ function validateForm(): boolean {
     error.value = usernameValid.value.message
     return false
   }
-  if (!password.value) {
+    if (!password.value) {
     error.value = '请输入密码'
+    return false
+  }
+  if (isRegister.value && password.value !== confirmPassword.value) {
+    error.value = '两次密码输入不一致'
     return false
   }
   return true
@@ -56,10 +63,14 @@ async function handleSubmit() {
   success.value = ''
 
   try {
-    const result = await userStore.login(username.value, password.value)
+    const result = isRegister.value
+      ? await userStore.register(username.value, password.value)
+      : await userStore.login(username.value, password.value)
     if (result.ok) {
       if (result.data?.mustChangePassword)
         success.value = '登录成功，请修改默认密码'
+      else
+        success.value = isRegister.value ? '注册成功' : '登录成功'
       setTimeout(() => {
         window.location.href = '/'
       }, 500)
@@ -126,7 +137,7 @@ onMounted(fetchGameVersion)
             QQ农场智能助手
           </h1>
           <p class="logo-subtitle">
-            超级管理员登录
+            {{ isRegister ? '创建面板账号' : '登录面板' }}
           </p>
         </div>
       </header>
@@ -165,6 +176,21 @@ onMounted(fetchGameVersion)
           />
         </div>
 
+        <div v-if="isRegister" class="form-group">
+          <label class="form-label" for="confirmPassword">
+            <span class="i-carbon-locked" />
+            确认密码
+          </label>
+          <BaseInput
+            id="confirmPassword"
+            v-model="confirmPassword"
+            type="password"
+            placeholder="请再次输入密码"
+            autocomplete="new-password"
+            required
+          />
+        </div>
+
         <div v-if="error" class="message error-message" role="alert">
           <span class="i-carbon-warning-alt" />
           <div>
@@ -180,10 +206,18 @@ onMounted(fetchGameVersion)
 
         <BaseButton type="submit" variant="primary" block :loading="loading" class="submit-btn">
           <span v-if="!loading" class="inline-flex items-center gap-2">
-            <span class="i-carbon-login" />
-            登录
+            <span :class="isRegister ? 'i-carbon-user-follow' : 'i-carbon-login'" />
+            {{ isRegister ? '注册' : '登录' }}
           </span>
         </BaseButton>
+
+        <button
+          type="button"
+          class="mode-switch"
+          @click="mode = isRegister ? 'login' : 'register'; error = ''; success = ''"
+        >
+          {{ isRegister ? '已有账号？去登录' : '没有账号？立即注册' }}
+        </button>
       </form>
 
       <footer class="card-footer">
@@ -356,6 +390,16 @@ onMounted(fetchGameVersion)
 
 .submit-btn {
   margin-top: 2px;
+}
+
+.mode-switch {
+  margin-top: 12px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--ui-muted);
+  font-size: 12px;
+  cursor: pointer;
 }
 
 .card-footer {

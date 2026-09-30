@@ -43,6 +43,7 @@ function normalizeAccount(raw: any): Account {
         uin: String(source.uin || ''),
         qq: String(source.qq || source.uin || ''),
         avatar: String(source.avatar || source.avatarUrl || ''),
+        ownerId: String(source.ownerId || 'admin').trim() || 'admin',
         createdAt: Number(source.createdAt) || Date.now(),
         updatedAt: Number(source.updatedAt) || Date.now(),
     };
@@ -57,14 +58,21 @@ function addOrUpdateAccount(acc: Partial<Account> & { avatarUrl?: string }): Acc
     let touchedAccountId = '';
     const source: any = acc || {};
     const cleanAccount: any = {};
-    for (const key of ['id', 'name', 'code', 'platform', 'uin', 'qq', 'avatar', 'avatarUrl', 'nick']) {
+    for (const key of ['id', 'name', 'code', 'platform', 'uin', 'qq', 'avatar', 'avatarUrl', 'nick', 'ownerId']) {
         if (source[key] !== undefined) cleanAccount[key] = source[key];
     }
     acc = cleanAccount;
     if (acc.id) {
         const idx = data.accounts.findIndex(a => a.id === acc.id);
         if (idx >= 0) {
-            data.accounts[idx] = { ...data.accounts[idx], ...acc, name: acc.name !== undefined ? acc.name : data.accounts[idx].name, updatedAt: Date.now() };
+            const previous = data.accounts[idx];
+            data.accounts[idx] = {
+                ...previous,
+                ...acc,
+                name: acc.name !== undefined ? acc.name : previous.name,
+                ownerId: previous.ownerId || 'admin',
+                updatedAt: Date.now(),
+            };
             touchedAccountId = String(data.accounts[idx].id || '');
         }
     } else {
@@ -78,6 +86,7 @@ function addOrUpdateAccount(acc: Partial<Account> & { avatarUrl?: string }): Acc
             uin: acc.uin ? String(acc.uin) : '',
             qq: acc.qq ? String(acc.qq) : (acc.uin ? String(acc.uin) : ''),
             avatar: acc.avatar || acc.avatarUrl || '',
+            ownerId: String((acc as any).ownerId || 'admin').trim() || 'admin',
             createdAt: Date.now(),
             updatedAt: Date.now(),
         });

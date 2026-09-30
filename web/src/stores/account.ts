@@ -2,6 +2,7 @@ import { useStorage } from '@vueuse/core'
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import api from '@/api'
+import { useUserStore } from '@/stores/user'
 
 export interface Account {
   id: string
@@ -58,6 +59,7 @@ export const useAccountStore = defineStore('account', () => {
         return
       if (res.data.ok && res.data.data && res.data.data.accounts) {
         accounts.value = res.data.data.accounts
+        void useUserStore().fetchUserInfo()
 
         // Auto-select first account if none selected or selected not found
         if (accounts.value.length > 0) {

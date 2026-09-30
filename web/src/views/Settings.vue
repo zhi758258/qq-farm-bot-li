@@ -26,14 +26,14 @@ const userStore = useUserStore()
 const settingStore = useSettingStore()
 const statusStore = useStatusStore()
 
-type SettingsTab = 'account' | 'strategy' | 'automation' | 'system'
+type SettingsTab = 'account' | 'strategy' | 'automation' | 'system' | 'users'
 const storedTab = localStorage.getItem('settings-active-tab')
-const settingsTabKeys: SettingsTab[] = ['account', 'strategy', 'automation', 'system']
+const settingsTabKeys: SettingsTab[] = ['account', 'strategy', 'automation', 'system', 'users']
 const queryTab = String(route.query.tab || '')
-const initialTab = settingsTabKeys.includes(queryTab as SettingsTab)
+const resolvedInitialTab = settingsTabKeys.includes(queryTab as SettingsTab)
   ? queryTab as SettingsTab
   : storedTab === 'user' ? 'system' : (storedTab as SettingsTab) || 'account'
-const activeTab = ref<SettingsTab>(initialTab)
+const activeTab = ref<SettingsTab>(resolvedInitialTab === 'users' && !userStore.isAdmin ? 'system' : resolvedInitialTab)
 
 watch(activeTab, (newTab) => {
   localStorage.setItem('settings-active-tab', newTab)
@@ -50,15 +50,25 @@ watch(() => route.query.tab, (value) => {
     activeTab.value = nextTab as SettingsTab
 })
 
-const tabs = [
-  { key: 'account', label: '账号管理', icon: 'i-carbon-user-profile' },
-  { key: 'strategy', label: '策略设置', icon: 'i-carbon-settings-adjust' },
-  { key: 'automation', label: '自动控制', icon: 'i-carbon-settings-adjust' },
-  { key: 'system', label: '系统设置', icon: 'i-carbon-settings' },
-] as const
+watch(() => userStore.isAdmin, (admin) => {
+  if (!admin && activeTab.value === 'users')
+    activeTab.value = 'system'
+})
+
+const tabs = computed(() => {
+  const items: { key: SettingsTab, label: string, icon: string }[] = [
+    { key: 'account', label: '账号管理', icon: 'i-carbon-user-profile' },
+    { key: 'strategy', label: '策略设置', icon: 'i-carbon-settings-adjust' },
+    { key: 'automation', label: '自动控制', icon: 'i-carbon-settings-adjust' },
+    { key: 'system', label: '系统设置', icon: 'i-carbon-settings' },
+  ]
+  if (userStore.isAdmin)
+    items.push({ key: 'users', label: '用户管理', icon: 'i-carbon-user-multiple' })
+  return items
+})
 
 function setActiveTab(value: string) {
-  if (tabs.some(tab => tab.key === value))
+  if (tabs.value.some(tab => tab.key === value))
     activeTab.value = value as typeof activeTab.value
 }
 
@@ -131,6 +141,8 @@ onMounted(async () => {
   if (currentAccountId.value)
     await loadStrategyData(currentAccountId.value)
   await Promise.all([loadSystemConfig(), loadDevicePresets()])
+  if (userStore.isAdmin)
+    await loadPanelUsers()
 })
 
 function openSettings(account: any) {
@@ -1038,6 +1050,78 @@ const passwordForm = ref({
   new: '',
   confirm: '',
 })
+
+interface PanelUser {
+  id: string
+  username: string
+  role: string
+  quota: number
+  usedQuota: number
+  enabled: boolean
+  createdAt?: number
+}
+
+const panelUsers = ref<PanelUser[]>([])
+const panelUsersLoading = ref(false)
+const panelUserSavingId = ref('')
+const quotaDrafts = ref<Record<string, number>>({})
+
+async function loadPanelUsers() {
+  if (!userStore.isAdmin)
+    return
+  panelUsersLoading.value = true
+  try {
+    const { data } = await api.get('/api/admin/users')
+    if (data?.ok && Array.isArray(data.data)) {
+      panelUsers.value = data.data
+      quotaDrafts.value = Object.fromEntries(data.data.map((user: PanelUser) => [user.id, user.quota]))
+    }
+  }
+  finally {
+    panelUsersLoading.value = false
+  }
+}
+
+async function saveUserQuota(user: PanelUser) {
+  const quota = Number(quotaDrafts.value[user.id])
+  panelUserSavingId.value = user.id
+  try {
+    const { data } = await api.put(`/api/admin/users/${user.id}/quota`, { quota })
+    if (data?.ok) {
+      showAlert('额度已更新', 'primary')
+      await loadPanelUsers()
+    }
+    else {
+      showAlert(`更新失败: ${getApiErrorMessage(data, '未知错误')}`, 'danger')
+    }
+  }
+  catch (e: any) {
+    showAlert(`更新失败: ${getApiErrorMessage(e, '请求失败')}`, 'danger')
+  }
+  finally {
+    panelUserSavingId.value = ''
+  }
+}
+
+async function toggleUserEnabled(user: PanelUser) {
+  panelUserSavingId.value = user.id
+  try {
+    const { data } = await api.put(`/api/admin/users/${user.id}/enabled`, { enabled: !user.enabled })
+    if (data?.ok) {
+      showAlert(user.enabled ? '已禁用该用户' : '已启用该用户', 'primary')
+      await loadPanelUsers()
+    }
+    else {
+      showAlert(`操作失败: ${getApiErrorMessage(data, '未知错误')}`, 'danger')
+    }
+  }
+  catch (e: any) {
+    showAlert(`操作失败: ${getApiErrorMessage(e, '请求失败')}`, 'danger')
+  }
+  finally {
+    panelUserSavingId.value = ''
+  }
+}
 
 const localOffline = ref({
   channel: 'webhook',
@@ -2122,10 +2206,10 @@ async function handleResetSystemConfig() {
                   </div>
                   <div>
                     <h4 class="text-base text-gray-900 font-bold dark:text-gray-100">
-                      修改管理员密码
+                      修改登录密码
                     </h4>
                     <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-                      更新后台管理登录凭据
+                      更新当前面板账号密码
                     </p>
                   </div>
                 </div>
@@ -2135,7 +2219,7 @@ async function handleResetSystemConfig() {
                     v-model="passwordForm.old"
                     label="当前密码"
                     type="password"
-                    placeholder="当前管理员密码"
+                    placeholder="当前登录密码"
                   />
                   <BaseInput
                     v-model="passwordForm.new"
@@ -2158,7 +2242,7 @@ async function handleResetSystemConfig() {
                     :loading="passwordSaving"
                     @click="handleChangePassword"
                   >
-                    修改管理员密码
+                    修改登录密码
                   </BaseButton>
                 </div>
               </section>
@@ -2268,6 +2352,65 @@ async function handleResetSystemConfig() {
                   </BaseButton>
                 </div>
               </section>
+            </div>
+          </div>
+        </div>
+
+        <div v-else-if="activeTab === 'users'" class="space-y-4">
+          <div class="flex items-center justify-between gap-3">
+            <h3 class="text-lg text-gray-900 font-bold dark:text-gray-100">
+              用户管理
+            </h3>
+            <BaseButton variant="secondary" size="sm" :loading="panelUsersLoading" @click="loadPanelUsers">
+              刷新
+            </BaseButton>
+          </div>
+          <p class="text-xs text-gray-500 dark:text-gray-400">
+            注册用户默认额度 99，可在此调整可绑定游戏账号上限或禁用账号。
+          </p>
+          <div v-if="panelUsers.length === 0" class="rounded-lg border border-dashed border-gray-200 p-6 text-center text-sm text-gray-500 dark:border-gray-700">
+            暂无注册用户
+          </div>
+          <div v-else class="space-y-3">
+            <div
+              v-for="user in panelUsers"
+              :key="user.id"
+              class="farm-card rounded-lg p-4"
+            >
+              <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <div class="text-sm text-gray-900 font-medium dark:text-gray-100">
+                    {{ user.username }}
+                  </div>
+                  <div class="mt-1 text-xs text-gray-500">
+                    已用 {{ user.usedQuota }} / {{ user.quota }} · {{ user.enabled ? '已启用' : '已禁用' }}
+                  </div>
+                </div>
+                <div class="flex flex-wrap items-center gap-2">
+                  <BaseInput
+                    v-model.number="quotaDrafts[user.id]"
+                    type="number"
+                    min="0"
+                    class="w-28"
+                  />
+                  <BaseButton
+                    variant="primary"
+                    size="sm"
+                    :loading="panelUserSavingId === user.id"
+                    @click="saveUserQuota(user)"
+                  >
+                    保存额度
+                  </BaseButton>
+                  <BaseButton
+                    variant="secondary"
+                    size="sm"
+                    :loading="panelUserSavingId === user.id"
+                    @click="toggleUserEnabled(user)"
+                  >
+                    {{ user.enabled ? '禁用' : '启用' }}
+                  </BaseButton>
+                </div>
+              </div>
             </div>
           </div>
         </div>

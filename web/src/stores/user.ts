@@ -3,23 +3,43 @@ import { defineStore } from 'pinia'
 import { computed } from 'vue'
 import api, { getApiErrorMessage } from '@/api'
 
+export type UserRole = 'admin' | 'user'
+
 export interface AdminInfo {
+  id?: string
   username: string
-  role: 'admin'
+  role: UserRole
   avatar?: string
+  quota?: number | null
+  usedQuota?: number
+  enabled?: boolean
   mustChangePassword?: boolean
 }
 
 export interface LoginResult {
   ok: boolean
   error?: string
-  errorType?: 'rate_limit' | 'locked' | 'invalid_credentials'
+  errorType?: 'rate_limit' | 'locked' | 'invalid_credentials' | 'disabled'
   remainingMs?: number
   data?: {
     token: string
-    role: 'admin'
-    user: { username: string }
+    role: UserRole
+    user: { id?: string, username: string }
+    quota?: number | null
+    usedQuota?: number
     mustChangePassword?: boolean
+  }
+}
+
+function applyAuthPayload(tokenRef: { value: string }, userInfoRef: { value: AdminInfo | null }, data: NonNullable<LoginResult['data']>) {
+  tokenRef.value = data.token
+  userInfoRef.value = {
+    id: data.user.id,
+    username: data.user.username,
+    role: data.role,
+    quota: data.quota,
+    usedQuota: data.usedQuota ?? 0,
+    mustChangePassword: data.mustChangePassword,
   }
 }
 
@@ -29,18 +49,22 @@ export const useUserStore = defineStore('user', () => {
   const isLoggedIn = computed(() => !!token.value)
   const username = computed(() => userInfo.value?.username || '')
   const avatar = computed(() => userInfo.value?.avatar || '')
+  const role = computed<UserRole>(() => userInfo.value?.role === 'user' ? 'user' : 'admin')
+  const isAdmin = computed(() => role.value === 'admin')
+  const quota = computed(() => userInfo.value?.quota ?? null)
+  const usedQuota = computed(() => userInfo.value?.usedQuota ?? 0)
+  const quotaLabel = computed(() => {
+    if (isAdmin.value)
+      return '不限'
+    return `${usedQuota.value} / ${quota.value ?? 99}`
+  })
+  const roleLabel = computed(() => isAdmin.value ? '超级管理员' : '普通用户')
 
-  async function login(username: string, password: string): Promise<LoginResult> {
+  async function login(usernameValue: string, password: string): Promise<LoginResult> {
     try {
-      const res = await api.post('/api/login', { username, password })
-      if (res.data.ok) {
-        token.value = res.data.data.token
-        userInfo.value = {
-          username: res.data.data.user.username,
-          role: 'admin',
-          mustChangePassword: res.data.data.mustChangePassword,
-        }
-      }
+      const res = await api.post('/api/login', { username: usernameValue, password })
+      if (res.data.ok)
+        applyAuthPayload(token, userInfo, res.data.data)
       return res.data
     }
     catch (error: any) {
@@ -48,6 +72,21 @@ export const useUserStore = defineStore('user', () => {
       return data
         ? { ok: false, error: getApiErrorMessage(data, '网络错误'), errorType: data.errorType, remainingMs: data.remainingMs }
         : { ok: false, error: getApiErrorMessage(error, '网络错误') }
+    }
+  }
+
+  async function register(usernameValue: string, password: string): Promise<LoginResult> {
+    try {
+      const res = await api.post('/api/register', { username: usernameValue, password })
+      if (res.data.ok)
+        applyAuthPayload(token, userInfo, res.data.data)
+      return res.data
+    }
+    catch (error: any) {
+      const data = error.response?.data
+      return data
+        ? { ok: false, error: getApiErrorMessage(data, '注册失败') }
+        : { ok: false, error: getApiErrorMessage(error, '注册失败') }
     }
   }
 
@@ -84,7 +123,14 @@ export const useUserStore = defineStore('user', () => {
     isLoggedIn,
     username,
     avatar,
+    role,
+    isAdmin,
+    quota,
+    usedQuota,
+    quotaLabel,
+    roleLabel,
     login,
+    register,
     logout,
     fetchUserInfo,
     changePassword,

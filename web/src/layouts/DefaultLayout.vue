@@ -2,13 +2,15 @@
 import { useMediaQuery } from '@vueuse/core'
 import { NButton } from 'naive-ui/es/button'
 import { storeToRefs } from 'pinia'
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import MobileBottomNav from '@/components/MobileBottomNav.vue'
 import Sidebar from '@/components/Sidebar.vue'
 import { useAppStore } from '@/stores/app'
+import { useUserStore } from '@/stores/user'
 
 const appStore = useAppStore()
+const userStore = useUserStore()
 const route = useRoute()
 const isDesktop = useMediaQuery('(min-width: 1024px)')
 const { sidebarOpen, sidebarCollapsed } = storeToRefs(appStore)
@@ -21,6 +23,10 @@ function toggleNavigation() {
   else
     appStore.toggleSidebar()
 }
+
+onMounted(() => {
+  void userStore.fetchUserInfo()
+})
 </script>
 
 <template>
