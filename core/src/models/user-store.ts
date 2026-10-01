@@ -4,6 +4,7 @@ const { getDataFile, ensureDataDir } = require('../config/runtime-paths');
 const security = require('./auth-security');
 const adminStore = require('./admin-store');
 const store = require('./store');
+const cardKeyStore = require('./card-key-store');
 
 const USERS_FILE: string = getDataFile('users.json');
 const DEFAULT_USER_QUOTA = 99;
@@ -16,6 +17,7 @@ interface UserRecord {
     role: 'user';
     quota: number;
     enabled: boolean;
+    expiresAt: number;
     createdAt: number;
     updatedAt: number;
 }
@@ -32,6 +34,7 @@ interface PublicUser {
     quota: number | null;
     usedQuota: number;
     enabled: boolean;
+    expiresAt: number | null;
     createdAt?: number;
     mustChangePassword?: boolean;
 }
@@ -60,6 +63,7 @@ function normalizeUser(raw: any): UserRecord | null {
         role: 'user',
         quota: Number.isFinite(quota) && quota >= 0 ? Math.floor(quota) : DEFAULT_USER_QUOTA,
         enabled: raw.enabled !== false,
+        expiresAt: Number(raw.expiresAt) || 0,
         createdAt: Number(raw.createdAt) || Date.now(),
         updatedAt: Number(raw.updatedAt) || Date.now(),
     };
@@ -130,6 +134,7 @@ function toPublicUser(user: UserRecord): PublicUser {
         quota: user.quota,
         usedQuota: countOwnedAccounts(user.id),
         enabled: user.enabled,
+        expiresAt: user.expiresAt || 0,
         createdAt: user.createdAt,
     };
 }
@@ -143,6 +148,7 @@ function getAdminPublicInfo(): PublicUser {
         quota: null,
         usedQuota: countOwnedAccounts(ADMIN_USER_ID),
         enabled: true,
+        expiresAt: null,
         mustChangePassword: info.mustChangePassword === true,
     };
 }
@@ -159,13 +165,19 @@ function findUserByUsername(username: string): UserRecord | null {
     return loadUsers().users.find(user => user.username === name) || null;
 }
 
-function registerUser(username: string, password: string): { ok: true; user: PublicUser } | { ok: false; status: number; error: string } {
+function isUserExpired(user: UserRecord, now: number = Date.now()): boolean {
+    return Number(user.expiresAt) > 0 && Number(user.expiresAt) <= now;
+}
+
+function registerUser(username: string, password: string, cardKey: string = ''): { ok: true; user: PublicUser } | { ok: false; status: number; error: string } {
     const nameCheck = validateUsername(username);
     if (!nameCheck.valid) return { ok: false, status: 400, error: nameCheck.error || '用户名不合法' };
     const strength = security.validatePasswordStrength(String(password || ''));
     if (!strength.valid) return { ok: false, status: 400, error: strength.errors.join('；') };
     const name = String(username).trim();
     if (usernameExists(name)) return { ok: false, status: 409, error: '用户名已被使用' };
+    const peek = cardKeyStore.peekCardKey(cardKey);
+    if (!peek.ok) return peek;
 
     const data = loadUsers();
     const now = Date.now();
@@ -176,11 +188,18 @@ function registerUser(username: string, password: string): { ok: true; user: Pub
         role: 'user',
         quota: DEFAULT_USER_QUOTA,
         enabled: true,
+        expiresAt: cardKeyStore.daysToExpiresAt(peek.days, now),
         createdAt: now,
         updatedAt: now,
     };
     data.users.push(user);
     saveUsers(data);
+    const consumed = cardKeyStore.consumeCardKey(cardKey, user.id);
+    if (!consumed.ok) {
+        data.users = data.users.filter(item => item.id !== user.id);
+        saveUsers(data);
+        return consumed;
+    }
     return { ok: true, user: toPublicUser(user) };
 }
 
@@ -201,6 +220,7 @@ function validateUser(username: string, password: string, ip: string = 'unknown'
             : { error: 'invalid_credentials', message: `用户名或密码错误，剩余尝试次数: ${attempt.remainingAttempts}` };
     }
     if (!user.enabled) return { error: 'disabled', message: '账号已被禁用' };
+    if (isUserExpired(user)) return { error: 'expired', message: '账号已过期' };
 
     security.clearFailedAttempts(name);
     if (security.needsRehash(user.password)) {
@@ -296,4 +316,5 @@ module.exports = {
     canAddGameAccount,
     findUserById,
     findUserByUsername,
+    isUserExpired,
 };

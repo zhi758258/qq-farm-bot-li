@@ -8,6 +8,7 @@ const { getSchedulerRegistrySnapshot } = require('../../services/scheduler');
 const { createModuleLogger } = require('../../services/logger');
 const adminStore = require('../../models/admin-store');
 const userStore = require('../../models/user-store');
+const cardKeyStore = require('../../models/card-key-store');
 
 const {
     getClientIp,
@@ -25,7 +26,7 @@ const adminLogger = createModuleLogger('admin');
 function loginStatus(errorType: string): number {
     if (errorType === 'rate_limit') return 429;
     if (errorType === 'locked') return 423;
-    if (errorType === 'disabled') return 403;
+    if (errorType === 'disabled' || errorType === 'expired') return 403;
     return 401;
 }
 
@@ -56,6 +57,7 @@ function sessionPayload(session: Session | undefined, extra: Record<string, any>
         user: { id: session.userId, username: session.username },
         quota: profile?.quota ?? (session.role === 'admin' ? null : 0),
         usedQuota: profile?.usedQuota ?? 0,
+        expiresAt: profile?.expiresAt ?? null,
         mustChangePassword: profile?.mustChangePassword === true,
         ...extra,
     };
@@ -65,9 +67,19 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
     const authRequired = createAuthRequired(ctx);
     const adminRequired = createAdminRequired();
 
+    app.get('/api/card-keys/public', (_req: Request, res: Response) => {
+        res.json({ ok: true, data: cardKeyStore.getPublicClaimStatus() });
+    });
+
+    app.post('/api/card-keys/claim', (_req: Request, res: Response) => {
+        const claimed = cardKeyStore.claimCardKey();
+        if (!claimed.ok) return res.status(claimed.status).json({ ok: false, error: claimed.error });
+        return res.json({ ok: true, data: { code: claimed.code, days: claimed.days, description: claimed.description } });
+    });
+
     app.post('/api/register', (req: Request, res: Response) => {
-        const { username, password } = req.body || {};
-        const created = userStore.registerUser(String(username || ''), String(password || ''));
+        const { username, password, cardKey } = req.body || {};
+        const created = userStore.registerUser(String(username || ''), String(password || ''), String(cardKey || ''));
         if (!created.ok) {
             return res.status(created.status).json({ ok: false, error: created.error });
         }
@@ -85,6 +97,7 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
                 user: { id: created.user.id, username: created.user.username },
                 quota: created.user.quota,
                 usedQuota: created.user.usedQuota,
+                expiresAt: created.user.expiresAt,
                 mustChangePassword: false,
             },
         });
@@ -148,6 +161,7 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
                 user: { id: userResult.id, username: userResult.username },
                 quota: userResult.quota,
                 usedQuota: userResult.usedQuota,
+                expiresAt: userResult.expiresAt,
                 mustChangePassword: false,
             },
         });
@@ -167,7 +181,7 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
     });
 
     app.use('/api', (req: Request, res: Response, next: any) => {
-        if (req.path === '/login' || req.path === '/register' || req.path === '/game-version') return next();
+        if (req.path === '/login' || req.path === '/register' || req.path === '/game-version' || req.path === '/card-keys/public' || req.path === '/card-keys/claim') return next();
         return authRequired(req, res, next);
     });
 
@@ -239,6 +253,26 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
         if (!result.ok) return res.status(result.status).json({ ok: false, error: result.error });
         if (!enabled) revokeUserSessions(ctx, result.user.id);
         return res.json({ ok: true, data: result.user });
+    });
+
+    app.get('/api/admin/card-keys', adminRequired, (_req: Request, res: Response) => {
+        res.json({ ok: true, data: cardKeyStore.listCardKeys() });
+    });
+
+    app.post('/api/admin/card-keys', adminRequired, (req: Request, res: Response) => {
+        const body = req.body || {};
+        const result = cardKeyStore.createCardKeys({
+            count: body.count,
+            days: body.days,
+            description: body.description,
+        });
+        if (!result.ok) return res.status(result.status).json({ ok: false, error: result.error });
+        return res.json({ ok: true, data: result.keys });
+    });
+
+    app.put('/api/admin/card-keys/claim-enabled', adminRequired, (req: Request, res: Response) => {
+        const enabled = (req.body || {}).enabled === true;
+        return res.json({ ok: true, data: cardKeyStore.setClaimEnabled(enabled) });
     });
 }
 

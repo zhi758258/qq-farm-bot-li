@@ -13,13 +13,14 @@ export interface AdminInfo {
   quota?: number | null
   usedQuota?: number
   enabled?: boolean
+  expiresAt?: number | null
   mustChangePassword?: boolean
 }
 
 export interface LoginResult {
   ok: boolean
   error?: string
-  errorType?: 'rate_limit' | 'locked' | 'invalid_credentials' | 'disabled'
+  errorType?: 'rate_limit' | 'locked' | 'invalid_credentials' | 'disabled' | 'expired'
   remainingMs?: number
   data?: {
     token: string
@@ -27,6 +28,7 @@ export interface LoginResult {
     user: { id?: string, username: string }
     quota?: number | null
     usedQuota?: number
+    expiresAt?: number | null
     mustChangePassword?: boolean
   }
 }
@@ -39,6 +41,7 @@ function applyAuthPayload(tokenRef: { value: string }, userInfoRef: { value: Adm
     role: data.role,
     quota: data.quota,
     usedQuota: data.usedQuota ?? 0,
+    expiresAt: data.expiresAt ?? null,
     mustChangePassword: data.mustChangePassword,
   }
 }
@@ -75,9 +78,9 @@ export const useUserStore = defineStore('user', () => {
     }
   }
 
-  async function register(usernameValue: string, password: string): Promise<LoginResult> {
+  async function register(usernameValue: string, password: string, cardKey = ''): Promise<LoginResult> {
     try {
-      const res = await api.post('/api/register', { username: usernameValue, password })
+      const res = await api.post('/api/register', { username: usernameValue, password, cardKey })
       if (res.data.ok)
         applyAuthPayload(token, userInfo, res.data.data)
       return res.data

@@ -26,14 +26,14 @@ const userStore = useUserStore()
 const settingStore = useSettingStore()
 const statusStore = useStatusStore()
 
-type SettingsTab = 'account' | 'strategy' | 'automation' | 'system' | 'users'
+type SettingsTab = 'account' | 'strategy' | 'automation' | 'system' | 'users' | 'card-keys'
 const storedTab = localStorage.getItem('settings-active-tab')
-const settingsTabKeys: SettingsTab[] = ['account', 'strategy', 'automation', 'system', 'users']
+const settingsTabKeys: SettingsTab[] = ['account', 'strategy', 'automation', 'system', 'users', 'card-keys']
 const queryTab = String(route.query.tab || '')
 const resolvedInitialTab = settingsTabKeys.includes(queryTab as SettingsTab)
   ? queryTab as SettingsTab
   : storedTab === 'user' ? 'system' : (storedTab as SettingsTab) || 'account'
-const activeTab = ref<SettingsTab>(resolvedInitialTab === 'users' && !userStore.isAdmin ? 'system' : resolvedInitialTab)
+const activeTab = ref<SettingsTab>((resolvedInitialTab === 'users' || resolvedInitialTab === 'card-keys') && !userStore.isAdmin ? 'system' : resolvedInitialTab)
 
 watch(activeTab, (newTab) => {
   localStorage.setItem('settings-active-tab', newTab)
@@ -51,7 +51,7 @@ watch(() => route.query.tab, (value) => {
 })
 
 watch(() => userStore.isAdmin, (admin) => {
-  if (!admin && activeTab.value === 'users')
+  if (!admin && (activeTab.value === 'users' || activeTab.value === 'card-keys'))
     activeTab.value = 'system'
 })
 
@@ -62,8 +62,10 @@ const tabs = computed(() => {
     { key: 'automation', label: '自动控制', icon: 'i-carbon-settings-adjust' },
     { key: 'system', label: '系统设置', icon: 'i-carbon-settings' },
   ]
-  if (userStore.isAdmin)
+  if (userStore.isAdmin) {
     items.push({ key: 'users', label: '用户管理', icon: 'i-carbon-user-multiple' })
+    items.push({ key: 'card-keys', label: '卡密', icon: 'i-carbon-password' })
+  }
   return items
 })
 
@@ -142,7 +144,7 @@ onMounted(async () => {
     await loadStrategyData(currentAccountId.value)
   await Promise.all([loadSystemConfig(), loadDevicePresets()])
   if (userStore.isAdmin)
-    await loadPanelUsers()
+    await Promise.all([loadPanelUsers(), loadCardKeys()])
 })
 
 function openSettings(account: any) {
@@ -1058,6 +1060,7 @@ interface PanelUser {
   quota: number
   usedQuota: number
   enabled: boolean
+  expiresAt?: number | null
   createdAt?: number
 }
 
@@ -1101,6 +1104,101 @@ async function saveUserQuota(user: PanelUser) {
   finally {
     panelUserSavingId.value = ''
   }
+}
+
+interface PanelCardKey {
+  id: string
+  code: string
+  days: number
+  description: string
+  used: boolean
+  usedBy: string
+  usedAt: number
+  createdAt: number
+}
+
+const cardKeys = ref<PanelCardKey[]>([])
+const cardKeyStock = ref(0)
+const cardKeyClaimEnabled = ref(false)
+const cardKeysLoading = ref(false)
+const cardKeyCreating = ref(false)
+const cardKeySwitchSaving = ref(false)
+const cardKeyForm = ref({
+  count: 1,
+  days: 30,
+  description: '',
+})
+
+async function loadCardKeys() {
+  if (!userStore.isAdmin)
+    return
+  cardKeysLoading.value = true
+  try {
+    const { data } = await api.get('/api/admin/card-keys')
+    if (data?.ok && data.data) {
+      cardKeys.value = Array.isArray(data.data.keys) ? data.data.keys : []
+      cardKeyStock.value = Number(data.data.stock) || 0
+      cardKeyClaimEnabled.value = data.data.claimEnabled === true
+    }
+  }
+  finally {
+    cardKeysLoading.value = false
+  }
+}
+
+async function toggleCardKeyClaim(enabled?: boolean) {
+  const nextEnabled = enabled === true
+  cardKeySwitchSaving.value = true
+  try {
+    const { data } = await api.put('/api/admin/card-keys/claim-enabled', { enabled: nextEnabled })
+    if (data?.ok) {
+      cardKeyClaimEnabled.value = data.data?.claimEnabled === true
+      cardKeyStock.value = Number(data.data?.stock) || cardKeyStock.value
+      showAlert(cardKeyClaimEnabled.value ? '已开启卡密领取' : '已关闭卡密领取', 'primary')
+    }
+    else {
+      cardKeyClaimEnabled.value = !nextEnabled
+      showAlert(`更新失败: ${getApiErrorMessage(data, '未知错误')}`, 'danger')
+    }
+  }
+  catch (e: any) {
+    cardKeyClaimEnabled.value = !nextEnabled
+    showAlert(`更新失败: ${getApiErrorMessage(e, '请求失败')}`, 'danger')
+  }
+  finally {
+    cardKeySwitchSaving.value = false
+  }
+}
+
+async function createCardKeys() {
+  cardKeyCreating.value = true
+  try {
+    const { data } = await api.post('/api/admin/card-keys', {
+      count: Number(cardKeyForm.value.count),
+      days: Number(cardKeyForm.value.days),
+      description: cardKeyForm.value.description,
+    })
+    if (data?.ok) {
+      showAlert(`已创建 ${Array.isArray(data.data) ? data.data.length : 0} 张卡密`, 'primary')
+      await loadCardKeys()
+    }
+    else {
+      showAlert(`创建失败: ${getApiErrorMessage(data, '未知错误')}`, 'danger')
+    }
+  }
+  catch (e: any) {
+    showAlert(`创建失败: ${getApiErrorMessage(e, '请求失败')}`, 'danger')
+  }
+  finally {
+    cardKeyCreating.value = false
+  }
+}
+
+function formatCardKeyTime(value?: number | null) {
+  const ts = Number(value)
+  if (!ts)
+    return '—'
+  return new Date(ts).toLocaleString()
 }
 
 async function toggleUserEnabled(user: PanelUser) {
@@ -2383,7 +2481,7 @@ async function handleResetSystemConfig() {
                     {{ user.username }}
                   </div>
                   <div class="mt-1 text-xs text-gray-500">
-                    已用 {{ user.usedQuota }} / {{ user.quota }} · {{ user.enabled ? '已启用' : '已禁用' }}
+                    已用 {{ user.usedQuota }} / {{ user.quota }} · {{ user.enabled ? '已启用' : '已禁用' }} · 到期 {{ formatCardKeyTime(user.expiresAt) }}
                   </div>
                 </div>
                 <div class="flex flex-wrap items-center gap-2">
@@ -2410,6 +2508,107 @@ async function handleResetSystemConfig() {
                     {{ user.enabled ? '禁用' : '启用' }}
                   </BaseButton>
                 </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-else-if="activeTab === 'card-keys'" class="space-y-4">
+          <div class="flex items-center justify-between gap-3">
+            <h3 class="text-lg text-gray-900 font-bold dark:text-gray-100">
+              卡密管理
+            </h3>
+            <BaseButton variant="secondary" size="sm" :loading="cardKeysLoading" @click="loadCardKeys">
+              刷新
+            </BaseButton>
+          </div>
+
+          <div class="farm-card rounded-lg p-4">
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div class="text-sm text-gray-900 font-medium dark:text-gray-100">
+                  卡密领取功能
+                </div>
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  开启后，用户注册时可免费领取一张时间卡密
+                </p>
+              </div>
+              <div class="flex items-center gap-3">
+                <span class="text-xs text-gray-500">库存: {{ cardKeyStock }} 张</span>
+                <BaseSwitch
+                  v-model="cardKeyClaimEnabled"
+                  :disabled="cardKeySwitchSaving"
+                  @update:model-value="toggleCardKeyClaim"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div class="farm-card rounded-lg p-4 space-y-3">
+            <div class="text-sm text-gray-900 font-medium dark:text-gray-100">
+              创建时间卡密
+            </div>
+            <div class="flex flex-wrap items-end gap-3">
+              <BaseInput
+                v-model.number="cardKeyForm.count"
+                type="number"
+                min="1"
+                max="200"
+                label="数量"
+                class="w-24"
+              />
+              <BaseInput
+                v-model.number="cardKeyForm.days"
+                type="number"
+                min="1"
+                max="3650"
+                label="天数"
+                class="w-24"
+              />
+              <BaseInput
+                v-model="cardKeyForm.description"
+                label="描述"
+                placeholder="例如 300天卡"
+                class="w-40"
+              />
+              <BaseButton
+                variant="primary"
+                size="sm"
+                :loading="cardKeyCreating"
+                @click="createCardKeys"
+              >
+                创建卡密
+              </BaseButton>
+            </div>
+          </div>
+
+          <div v-if="cardKeys.length === 0" class="rounded-lg border border-dashed border-gray-200 p-6 text-center text-sm text-gray-500 dark:border-gray-700">
+            暂无卡密
+          </div>
+          <div v-else class="space-y-3">
+            <div
+              v-for="item in cardKeys"
+              :key="item.id"
+              class="farm-card rounded-lg p-4"
+            >
+              <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <div class="font-mono text-sm text-gray-900 dark:text-gray-100">
+                    {{ item.code }}
+                  </div>
+                  <div class="mt-1 text-xs text-gray-500">
+                    {{ item.description || `${item.days}天卡` }} · {{ item.days }} 天 · {{ item.used ? '已使用' : '未使用' }}
+                  </div>
+                  <div v-if="item.used" class="mt-1 text-xs text-gray-400">
+                    使用者 {{ item.usedBy || '—' }} · {{ formatCardKeyTime(item.usedAt) }}
+                  </div>
+                </div>
+                <span
+                  class="inline-flex items-center rounded-full px-2 py-0.5 text-xs"
+                  :class="item.used ? 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-300' : 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'"
+                >
+                  {{ item.used ? '已使用' : '时间' }}
+                </span>
               </div>
             </div>
           </div>

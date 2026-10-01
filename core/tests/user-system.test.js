@@ -2,15 +2,22 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const userStore = require('../dist/models/user-store');
+const cardKeyStore = require('../dist/models/card-key-store');
 const accounts = require('../dist/models/store/accounts');
 
 function uniqueName(prefix) {
     return `${prefix}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 }
 
+function registerWithCard(username, password, days = 30) {
+    const createdKeys = cardKeyStore.createCardKeys({ count: 1, days, description: `${days}天卡` });
+    assert.equal(createdKeys.ok, true);
+    return userStore.registerUser(username, password, createdKeys.keys[0].code);
+}
+
 test('registerUser assigns quota 99 and role user', () => {
     const username = uniqueName('alice');
-    const result = userStore.registerUser(username, 'Test1234');
+    const result = registerWithCard(username, 'Test1234');
     assert.equal(result.ok, true);
     assert.equal(result.user.role, 'user');
     assert.equal(result.user.quota, 99);
@@ -21,22 +28,22 @@ test('registerUser assigns quota 99 and role user', () => {
 
 test('registerUser rejects duplicate username', () => {
     const username = uniqueName('bob');
-    const first = userStore.registerUser(username, 'Test1234');
+    const first = registerWithCard(username, 'Test1234');
     assert.equal(first.ok, true);
-    const second = userStore.registerUser(username, 'Test1234');
+    const second = registerWithCard(username, 'Test1234');
     assert.equal(second.ok, false);
     assert.equal(second.status, 409);
     assert.equal(second.error, '用户名已被使用');
 });
 
 test('registerUser rejects reserved admin username', () => {
-    const result = userStore.registerUser('admin', 'Test1234');
+    const result = registerWithCard('admin', 'Test1234');
     assert.equal(result.ok, false);
     assert.equal(result.status, 409);
 });
 
 test('registerUser rejects illegal username', () => {
-    const shortName = userStore.registerUser('ab', 'Test1234');
+    const shortName = registerWithCard('ab', 'Test1234');
     assert.equal(shortName.ok, false);
     assert.equal(shortName.status, 400);
 
@@ -46,7 +53,7 @@ test('registerUser rejects illegal username', () => {
 });
 
 test('registerUser rejects weak password', () => {
-    const result = userStore.registerUser(uniqueName('weak'), 'aaaaaa');
+    const result = registerWithCard(uniqueName('weak'), 'aaaaaa');
     assert.equal(result.ok, false);
     assert.equal(result.status, 400);
 });
@@ -58,7 +65,7 @@ test('canAddGameAccount allows admin without quota check', () => {
 
 test('canAddGameAccount blocks user after quota is filled', () => {
     const username = uniqueName('quota');
-    const created = userStore.registerUser(username, 'Test1234');
+    const created = registerWithCard(username, 'Test1234');
     assert.equal(created.ok, true);
     const userId = created.user.id;
     const lowered = userStore.updateQuota(userId, 1);
@@ -72,7 +79,7 @@ test('canAddGameAccount blocks user after quota is filled', () => {
 
 test('updateQuota rejects value below used count', () => {
     const username = uniqueName('used');
-    const created = userStore.registerUser(username, 'Test1234');
+    const created = registerWithCard(username, 'Test1234');
     assert.equal(created.ok, true);
     accounts.addOrUpdateAccount({ name: uniqueName('acc'), ownerId: created.user.id, code: 'code' });
     const result = userStore.updateQuota(created.user.id, 0);
@@ -83,12 +90,22 @@ test('updateQuota rejects value below used count', () => {
 
 test('disabled user cannot login', () => {
     const username = uniqueName('disabled');
-    const created = userStore.registerUser(username, 'Test1234');
+    const created = registerWithCard(username, 'Test1234');
     assert.equal(created.ok, true);
     const disabled = userStore.setUserEnabled(created.user.id, false);
     assert.equal(disabled.ok, true);
     const login = userStore.validateUser(username, 'Test1234', '127.0.0.1');
     assert.equal(login.error, 'disabled');
+});
+
+test('expired user cannot login', () => {
+    const username = uniqueName('expired');
+    const created = registerWithCard(username, 'Test1234', 1);
+    assert.equal(created.ok, true);
+    const user = userStore.findUserByUsername(username);
+    user.expiresAt = Date.now() - 1;
+    const login = userStore.validateUser(username, 'Test1234', '127.0.0.1');
+    assert.equal(login.error, 'expired');
 });
 
 test('legacy accounts without ownerId belong to admin', () => {

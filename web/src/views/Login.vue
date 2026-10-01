@@ -14,6 +14,9 @@ const mode = ref<'login' | 'register'>('login')
 const username = ref('')
 const password = ref('')
 const confirmPassword = ref('')
+const cardKey = ref('')
+const claimEnabled = ref(false)
+const claimLoading = ref(false)
 const error = ref('')
 const success = ref('')
 const loading = ref(false)
@@ -51,6 +54,10 @@ function validateForm(): boolean {
     error.value = '两次密码输入不一致'
     return false
   }
+  if (isRegister.value && !cardKey.value.trim()) {
+    error.value = '请输入卡密'
+    return false
+  }
   return true
 }
 
@@ -64,7 +71,7 @@ async function handleSubmit() {
 
   try {
     const result = isRegister.value
-      ? await userStore.register(username.value, password.value)
+      ? await userStore.register(username.value, password.value, cardKey.value.trim())
       : await userStore.login(username.value, password.value)
     if (result.ok) {
       if (result.data?.mustChangePassword)
@@ -121,7 +128,43 @@ async function fetchGameVersion() {
   }
 }
 
-onMounted(fetchGameVersion)
+async function fetchClaimStatus() {
+  try {
+    const res = await api.get('/api/card-keys/public')
+    if (res.data.ok)
+      claimEnabled.value = res.data.data?.claimEnabled === true
+  }
+  catch {
+    claimEnabled.value = false
+  }
+}
+
+async function claimCardKey() {
+  claimLoading.value = true
+  error.value = ''
+  success.value = ''
+  try {
+    const res = await api.post('/api/card-keys/claim')
+    if (res.data.ok && res.data.data?.code) {
+      cardKey.value = res.data.data.code
+      success.value = res.data.data.description ? `已领取 ${res.data.data.description}` : '卡密已填入'
+    }
+    else {
+      error.value = getApiErrorMessage(res.data, '领取失败')
+    }
+  }
+  catch (e: any) {
+    error.value = getApiErrorMessage(e, '领取失败')
+  }
+  finally {
+    claimLoading.value = false
+  }
+}
+
+onMounted(() => {
+  void fetchGameVersion()
+  void fetchClaimStatus()
+})
 </script>
 
 <template>
@@ -191,6 +234,32 @@ onMounted(fetchGameVersion)
           />
         </div>
 
+        <div v-if="isRegister" class="form-group">
+          <label class="form-label" for="cardKey">
+            <span class="i-carbon-password" />
+            卡密
+          </label>
+          <div class="card-key-row">
+            <BaseInput
+              id="cardKey"
+              v-model="cardKey"
+              type="text"
+              placeholder="请输入时间卡密"
+              autocomplete="off"
+              required
+            />
+            <BaseButton
+              v-if="claimEnabled"
+              type="button"
+              variant="secondary"
+              :loading="claimLoading"
+              @click="claimCardKey"
+            >
+              领取卡密
+            </BaseButton>
+          </div>
+        </div>
+
         <div v-if="error" class="message error-message" role="alert">
           <span class="i-carbon-warning-alt" />
           <div>
@@ -214,7 +283,7 @@ onMounted(fetchGameVersion)
         <button
           type="button"
           class="mode-switch"
-          @click="mode = isRegister ? 'login' : 'register'; error = ''; success = ''"
+          @click="mode = isRegister ? 'login' : 'register'; error = ''; success = ''; void fetchClaimStatus()"
         >
           {{ isRegister ? '已有账号？去登录' : '没有账号？立即注册' }}
         </button>
@@ -357,6 +426,17 @@ onMounted(fetchGameVersion)
 .login-card :deep(.base-input:focus) {
   border-color: rgba(67, 141, 99, 0.55);
   box-shadow: 0 0 0 3px rgba(67, 141, 99, 0.1);
+}
+
+.card-key-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.card-key-row :deep(.base-field) {
+  flex: 1;
+  min-width: 0;
 }
 
 .form-hint {
