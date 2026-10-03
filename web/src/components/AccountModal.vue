@@ -19,7 +19,7 @@ const emit = defineEmits(['close', 'saved'])
 
 const loading = ref(false)
 const errorMessage = ref('')
-const activeLoginTab = ref<'code' | 'wx_qr' | 'qq_qr'>('code')
+const activeLoginTab = ref<'code' | 'wx_qr' | 'qq_qr' | 'capture'>('code')
 const loginSettingsLoaded = ref(false)
 const loginSettings = ref({
   wechatQrLogin: true,
@@ -28,6 +28,14 @@ const loginSettings = ref({
   napCatSignature: '',
 })
 let loginSettingsRequestVersion = 0
+const captureLoginEnabled = ref(false)
+const captureLoading = ref(false)
+const captureCompleting = ref(false)
+const captureError = ref('')
+const captureStatus = ref('')
+const captureFlow = ref<any>(null)
+let capturePollTimer: ReturnType<typeof setTimeout> | undefined
+let captureFlowVersion = 0
 const wxTaskId = ref('')
 const wxStatus = ref('')
 const wxError = ref('')
@@ -55,6 +63,22 @@ let qrNameSubmitTimer: ReturnType<typeof setTimeout> | undefined
 
 const wechatQrLoginEnabled = computed(() => loginSettingsLoaded.value && loginSettings.value.wechatQrLogin)
 const qqQrLoginEnabled = computed(() => loginSettingsLoaded.value && loginSettings.value.qqQrLogin)
+const captureProxyTargets = computed(() => {
+  const info = captureFlow.value?.publicInfo
+  if (!info)
+    return []
+  const port = Number(info.mitmPort) || 18000
+  const addresses = Array.isArray(info.addresses) && info.addresses.length
+    ? info.addresses.map((item: any) => String(item?.address || item || '').trim()).filter(Boolean)
+    : [String(info.host || '').trim()].filter(Boolean)
+  return [...new Set(addresses)].map(address => `${address}:${port}`)
+})
+const captureRemainingLabel = computed(() => {
+  const remaining = Number(captureFlow.value?.publicInfo?.remainingSec) || 0
+  const minutes = Math.floor(remaining / 60)
+  const seconds = remaining % 60
+  return `${minutes}:${String(seconds).padStart(2, '0')}`
+})
 
 // 表单数据
 const form = reactive({
@@ -184,9 +208,145 @@ async function loadLoginSettings() {
         activeLoginTab.value = 'code'
       if (activeLoginTab.value === 'qq_qr' && !loginSettings.value.qqQrLogin)
         activeLoginTab.value = 'code'
+      if (activeLoginTab.value === 'capture' && !captureLoginEnabled.value)
+        activeLoginTab.value = 'code'
       if (activeLoginTab.value === 'qq_qr' && loginSettings.value.qqQrLogin && !qqTaskId.value)
         void startQqLogin()
+      if (activeLoginTab.value === 'capture' && captureLoginEnabled.value && !captureFlow.value)
+        void startCaptureLogin()
     }
+  }
+}
+
+async function loadCaptureConfig() {
+  try {
+    const response = await api.get('/api/capture/config', { skipErrorToast: true } as any)
+    captureLoginEnabled.value = response.data?.data?.enabled === true
+  }
+  catch {
+    captureLoginEnabled.value = false
+  }
+}
+
+function stopCapturePolling() {
+  if (capturePollTimer) {
+    clearTimeout(capturePollTimer)
+    capturePollTimer = undefined
+  }
+}
+
+async function resetCaptureLogin() {
+  const flowId = String(captureFlow.value?.id || '')
+  const flowVersion = captureFlowVersion
+  captureFlowVersion += 1
+  stopCapturePolling()
+  if (flowId && !captureFlow.value?.completed) {
+    void api.delete(`/api/capture/sessions/${encodeURIComponent(flowId)}`, { skipErrorToast: true } as any).catch(() => undefined)
+  }
+  if (flowVersion === captureFlowVersion - 1) {
+    captureFlow.value = null
+    captureError.value = ''
+    captureStatus.value = ''
+    captureLoading.value = false
+    captureCompleting.value = false
+  }
+}
+
+function applyCaptureSnapshot(snapshot: any) {
+  captureFlow.value = snapshot
+  if (snapshot?.completed && snapshot?.result) {
+    captureStatus.value = snapshot.result.updated ? '账号已更新' : '账号已添加'
+    return
+  }
+  if (snapshot?.codeCaptured)
+    captureStatus.value = '已抓到 Code，可完成添加'
+  else if (snapshot?.proxy?.running)
+    captureStatus.value = '代理已启动，请在手机安装证书并设置 HTTP 代理后打开农场'
+  else
+    captureStatus.value = snapshot?.proxy?.error || '等待启动抓包代理'
+}
+
+async function pollCaptureLogin(flowId: string, flowVersion: number) {
+  if (flowVersion !== captureFlowVersion || String(captureFlow.value?.id || '') !== flowId)
+    return
+  try {
+    const response = await api.get(`/api/capture/sessions/${encodeURIComponent(flowId)}`, { skipErrorToast: true } as any)
+    if (flowVersion !== captureFlowVersion)
+      return
+    const snapshot = response.data?.data
+    if (snapshot)
+      applyCaptureSnapshot(snapshot)
+    if (snapshot?.completed)
+      return
+  }
+  catch (error: any) {
+    if (flowVersion !== captureFlowVersion)
+      return
+    captureError.value = getApiErrorMessage(error, '抓包状态检查失败')
+  }
+  capturePollTimer = setTimeout(() => void pollCaptureLogin(flowId, flowVersion), 1500)
+}
+
+async function startCaptureLogin() {
+  if (!captureLoginEnabled.value) {
+    activeLoginTab.value = 'code'
+    return
+  }
+  await resetCaptureLogin()
+  const flowVersion = captureFlowVersion
+  captureLoading.value = true
+  captureError.value = ''
+  captureStatus.value = '正在启动抓包代理...'
+  try {
+    const response = await api.post('/api/capture/sessions', {
+      platform: props.editData ? (props.editData.platform || form.platform) : form.platform,
+      accountId: props.editData?.id || '',
+    }, { timeout: 30000 } as any)
+    if (flowVersion !== captureFlowVersion)
+      return
+    const snapshot = response.data?.data
+    if (!snapshot?.id)
+      throw new Error('未创建抓包任务')
+    applyCaptureSnapshot(snapshot)
+    void pollCaptureLogin(snapshot.id, flowVersion)
+  }
+  catch (error: any) {
+    if (flowVersion !== captureFlowVersion)
+      return
+    captureError.value = getApiErrorMessage(error, '抓包代理启动失败')
+  }
+  finally {
+    if (flowVersion === captureFlowVersion)
+      captureLoading.value = false
+  }
+}
+
+async function completeCaptureLogin() {
+  const flowId = String(captureFlow.value?.id || '')
+  if (!flowId || captureCompleting.value)
+    return
+  if (!props.editData && !form.name.trim()) {
+    captureError.value = '请输入账号备注'
+    return
+  }
+  captureCompleting.value = true
+  captureError.value = ''
+  try {
+    const response = await api.post(`/api/capture/sessions/${encodeURIComponent(flowId)}/complete`, {
+      name: form.name.trim(),
+    }, { timeout: 30000 } as any)
+    if (response.data?.ok) {
+      emit('saved')
+      close()
+      return
+    }
+    captureError.value = getApiErrorMessage(response.data, '添加账号失败')
+  }
+  catch (error: any) {
+    captureError.value = getApiErrorMessage(error, '添加账号失败')
+  }
+  finally {
+    captureCompleting.value = false
   }
 }
 
@@ -580,6 +740,7 @@ async function startQqLogin() {
 function close() {
   resetWxLogin()
   resetQqLogin()
+  void resetCaptureLogin()
   emit('close')
 }
 
@@ -588,7 +749,8 @@ watch(() => props.show, (newVal) => {
     errorMessage.value = ''
     activeLoginTab.value = 'code'
     resetWxLogin()
-    void loadLoginSettings()
+    void resetCaptureLogin()
+    void Promise.all([loadLoginSettings(), loadCaptureConfig()])
     if (props.editData) {
       form.name = props.editData.name || ''
       form.code = props.editData.code || ''
@@ -599,6 +761,9 @@ watch(() => props.show, (newVal) => {
       form.code = ''
       form.platform = 'qq'
     }
+  }
+  else {
+    void resetCaptureLogin()
   }
 })
 
@@ -611,10 +776,16 @@ watch(activeLoginTab, (tab) => {
     void startQqLogin()
   else if (tab === 'qq_qr' && !qqQrLoginEnabled.value)
     activeLoginTab.value = 'code'
+  else if (tab === 'capture' && captureLoginEnabled.value && !captureFlow.value)
+    void startCaptureLogin()
+  else if (tab === 'capture' && !captureLoginEnabled.value)
+    activeLoginTab.value = 'code'
   if (tab !== 'wx_qr')
     resetWxLogin()
   if (tab !== 'qq_qr')
     resetQqLogin()
+  if (tab !== 'capture')
+    void resetCaptureLogin()
 })
 
 watch(() => form.name, (name) => {
@@ -632,21 +803,22 @@ watch(() => form.name, (name) => {
 onBeforeUnmount(() => {
   resetWxLogin()
   resetQqLogin()
+  void resetCaptureLogin()
 })
 </script>
 
 <template>
   <NModal
     :show="show"
-    :mask-closable="!loading && !wxLoading && !qqLoading"
-    :close-on-esc="!loading && !wxLoading && !qqLoading"
+    :mask-closable="!loading && !wxLoading && !qqLoading && !captureLoading && !captureCompleting"
+    :close-on-esc="!loading && !wxLoading && !qqLoading && !captureLoading && !captureCompleting"
     @update:show="value => !value && close()"
   >
     <NCard
       class="account-modal-card"
       :title="editData ? '编辑账号' : '添加账号'"
       :bordered="false"
-      :closable="!loading && !wxLoading && !qqLoading"
+      :closable="!loading && !wxLoading && !qqLoading && !captureLoading && !captureCompleting"
       @close="close"
     >
       <div class="account-modal-content overflow-y-auto">
@@ -664,6 +836,9 @@ onBeforeUnmount(() => {
           </NTab>
           <NTab v-if="qqQrLoginEnabled" name="qq_qr">
             QQ扫码登录
+          </NTab>
+          <NTab v-if="captureLoginEnabled" name="capture">
+            抓包登录
           </NTab>
         </NTabs>
 
@@ -758,6 +933,65 @@ onBeforeUnmount(() => {
           <div class="flex justify-end gap-2">
             <BaseButton variant="outline" :loading="qqLoading" @click="startQqLogin">
               刷新二维码
+            </BaseButton>
+            <BaseButton variant="outline" @click="close">
+              取消
+            </BaseButton>
+          </div>
+        </div>
+        <div v-else-if="activeLoginTab === 'capture'" class="space-y-4" role="tabpanel" aria-label="抓包登录">
+          <BaseInput
+            v-if="!editData"
+            v-model="form.name"
+            label="账号备注（必填）"
+            placeholder="请输入账号备注"
+            class="farm-input"
+          />
+          <NRadioGroup v-if="!editData" v-model:value="form.platform" name="capture-platform">
+            <div class="flex gap-5">
+              <NRadio value="qq">
+                QQ 小程序
+              </NRadio>
+              <NRadio value="wx">
+                微信小程序
+              </NRadio>
+            </div>
+          </NRadioGroup>
+          <div class="space-y-2 rounded-lg border border-gray-200 bg-gray-50/70 p-3 text-sm dark:border-gray-700 dark:bg-gray-900/30">
+            <p>{{ captureStatus || '等待启动抓包代理' }}</p>
+            <p v-if="captureFlow?.codeCaptured" class="text-green-600">
+              已抓到 Code{{ captureFlow.accountGid ? `，GID ${captureFlow.accountGid}` : '' }}{{ captureFlow.friendCount ? `，好友 ${captureFlow.friendCount}` : '' }}
+            </p>
+            <p v-if="captureProxyTargets.length">
+              手机 HTTP 代理：{{ captureProxyTargets.join(' / ') }}
+            </p>
+            <p v-if="captureFlow?.publicInfo?.remainingSec">
+              代理剩余 {{ captureRemainingLabel }}
+            </p>
+            <a
+              v-if="captureFlow?.publicInfo?.certificateUrl"
+              :href="captureFlow.publicInfo.certificateUrl"
+              class="inline-block text-blue-600 underline"
+              target="_blank"
+              rel="noreferrer"
+            >
+              下载并安装 CA 证书
+            </a>
+            <p v-if="captureError" class="text-red-500">
+              {{ captureError }}
+            </p>
+          </div>
+          <div class="flex justify-end gap-2">
+            <BaseButton variant="outline" :loading="captureLoading" @click="startCaptureLogin">
+              重新开始
+            </BaseButton>
+            <BaseButton
+              variant="primary"
+              :loading="captureCompleting"
+              :disabled="!captureFlow?.codeCaptured"
+              @click="completeCaptureLogin"
+            >
+              {{ editData ? '完成更新' : '完成添加' }}
             </BaseButton>
             <BaseButton variant="outline" @click="close">
               取消

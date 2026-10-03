@@ -181,7 +181,14 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
     });
 
     app.use('/api', (req: Request, res: Response, next: any) => {
-        if (req.path === '/login' || req.path === '/register' || req.path === '/game-version' || req.path === '/card-keys/public' || req.path === '/card-keys/claim') return next();
+        if (
+            req.path === '/login'
+            || req.path === '/register'
+            || req.path === '/game-version'
+            || req.path === '/card-keys/public'
+            || req.path === '/card-keys/claim'
+            || req.path.startsWith('/public/capture-certificate/')
+        ) return next();
         return authRequired(req, res, next);
     });
 

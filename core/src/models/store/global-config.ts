@@ -1,4 +1,4 @@
-import type { AccountConfig, LoginSettings, OfflineReminder, SystemConfig, UIConfig } from '../../types/config';
+import type { AccountConfig, CaptureConfig, LoginSettings, OfflineReminder, SystemConfig, UIConfig } from '../../types/config';
 export {};
 
 const { readTextFile, writeJsonFileAtomic } = require('../../services/json-db');
@@ -11,6 +11,7 @@ const {
     PUSHOO_CHANNELS,
     DEFAULT_OFFLINE_REMINDER,
     DEFAULT_LOGIN_SETTINGS,
+    DEFAULT_CAPTURE_CONFIG,
     globalConfig,
     normalizeAccountConfig,
     cloneAccountConfig,
@@ -137,6 +138,50 @@ function setLoginSettings(cfg: Partial<LoginSettings> | undefined): LoginSetting
     return getLoginSettings();
 }
 
+function normalizeCaptureApiBase(value: unknown): string {
+    const raw = String(value || '').trim() || DEFAULT_CAPTURE_CONFIG.apiBase;
+    let url;
+    try {
+        url = new URL(raw);
+    } catch {
+        throw new Error('抓包服务地址格式无效');
+    }
+    if (!/^https?:$/.test(url.protocol) || url.username || url.password) {
+        throw new Error('抓包服务地址仅支持不含账号密码的 http(s) 地址');
+    }
+    url.hash = '';
+    url.search = '';
+    url.pathname = url.pathname.replace(/\/+$/, '');
+    return url.toString().replace(/\/+$/, '');
+}
+
+function normalizeCaptureConfig(input: unknown): CaptureConfig {
+    const src: Record<string, any> = (input && typeof input === 'object') ? input as Record<string, any> : {};
+    return {
+        enabled: src.enabled === true,
+        embedded: src.embedded !== false,
+        apiBase: String(src.apiBase || DEFAULT_CAPTURE_CONFIG.apiBase).trim() || DEFAULT_CAPTURE_CONFIG.apiBase,
+        apiToken: String(src.apiToken || '').trim(),
+        autoImportQqGids: src.autoImportQqGids !== false,
+    };
+}
+
+function getCaptureConfig(): CaptureConfig {
+    return normalizeCaptureConfig(globalConfig.captureConfig);
+}
+
+function setCaptureConfig(cfg: Partial<CaptureConfig> | undefined): CaptureConfig {
+    const current = getCaptureConfig();
+    const next = normalizeCaptureConfig({ ...current, ...(cfg || {}) });
+    next.apiBase = normalizeCaptureApiBase(next.apiBase);
+    if (next.enabled && next.embedded === false && !next.apiToken) {
+        throw new Error('启用前请填写 API Token');
+    }
+    globalConfig.captureConfig = next;
+    saveGlobalConfig();
+    return getCaptureConfig();
+}
+
 function setOfflineReminder(cfg: Partial<OfflineReminder> | undefined): OfflineReminder {
     const current = normalizeOfflineReminder(globalConfig.offlineReminder);
     globalConfig.offlineReminder = normalizeOfflineReminder({ ...current, ...(cfg || {}) });
@@ -200,6 +245,7 @@ loadGlobalConfig();
 // Apply offlineReminder normalization after load
 globalConfig.offlineReminder = normalizeOfflineReminder(globalConfig.offlineReminder);
 globalConfig.loginSettings = normalizeLoginSettings(globalConfig.loginSettings);
+globalConfig.captureConfig = normalizeCaptureConfig(globalConfig.captureConfig);
 if (sharedState.systemConfigMigrated) {
     saveGlobalConfig();
     sharedState.systemConfigMigrated = false;
@@ -211,6 +257,9 @@ module.exports = {
     setUITheme,
     getLoginSettings,
     setLoginSettings,
+    getCaptureConfig,
+    setCaptureConfig,
+    DEFAULT_CAPTURE_CONFIG,
     getOfflineReminder,
     setOfflineReminder,
     getSystemConfig,

@@ -50,6 +50,9 @@ module.exports = {
     setUITheme: globalConfig.setUITheme,
     getLoginSettings: globalConfig.getLoginSettings,
     setLoginSettings: globalConfig.setLoginSettings,
+    getCaptureConfig: globalConfig.getCaptureConfig,
+    setCaptureConfig: globalConfig.setCaptureConfig,
+    DEFAULT_CAPTURE_CONFIG: globalConfig.DEFAULT_CAPTURE_CONFIG,
     getOfflineReminder: globalConfig.getOfflineReminder,
     setOfflineReminder: globalConfig.setOfflineReminder,
 

@@ -118,6 +118,14 @@ export interface LoginSettings {
   napCatSignature: string;
 }
 
+export interface CaptureConfig {
+  enabled: boolean;
+  embedded: boolean;
+  apiBase: string;
+  apiToken: string;
+  autoImportQqGids: boolean;
+}
+
 export interface DeviceInfo {
   os: string;
   clientVersion: string;
@@ -143,6 +151,7 @@ export interface GlobalConfig {
   defaultAccountConfig: AccountConfig;
   ui: UIConfig;
   loginSettings: LoginSettings;
+  captureConfig: CaptureConfig;
   offlineReminder: OfflineReminder;
   systemConfig: SystemConfig | null;
 }

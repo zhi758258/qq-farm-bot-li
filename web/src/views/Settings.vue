@@ -144,7 +144,7 @@ onMounted(async () => {
     await loadStrategyData(currentAccountId.value)
   await Promise.all([loadSystemConfig(), loadDevicePresets()])
   if (userStore.isAdmin)
-    await Promise.all([loadPanelUsers(), loadCardKeys()])
+    await Promise.all([loadPanelUsers(), loadCardKeys(), loadCaptureConfig()])
 })
 
 function openSettings(account: any) {
@@ -1441,6 +1441,18 @@ async function handleTestOffline() {
 const systemConfigSaving = ref(false)
 const systemConfigLoading = ref(false)
 const loginSettingsSaving = ref(false)
+const captureConfigSaving = ref(false)
+const captureConfigTesting = ref(false)
+const captureConfigLoading = ref(false)
+const localCaptureConfig = ref({
+  enabled: false,
+  embedded: true,
+  apiBase: 'http://127.0.0.1:8450',
+  apiToken: '',
+  tokenConfigured: false,
+  autoImportQqGids: true,
+  running: false,
+})
 
 const defaultDeviceInfo = {
   os: 'Windows',
@@ -1555,6 +1567,85 @@ async function loadSystemConfig() {
   }
   finally {
     systemConfigLoading.value = false
+  }
+}
+
+function normalizeCaptureConfig(source: any) {
+  return {
+    enabled: source?.enabled === true,
+    embedded: source?.embedded !== false,
+    apiBase: typeof source?.apiBase === 'string' ? source.apiBase : 'http://127.0.0.1:8450',
+    apiToken: typeof source?.apiToken === 'string' ? source.apiToken : '',
+    tokenConfigured: source?.tokenConfigured === true,
+    autoImportQqGids: source?.autoImportQqGids !== false,
+    running: source?.running === true,
+  }
+}
+
+async function loadCaptureConfig() {
+  if (!userStore.isAdmin)
+    return
+  captureConfigLoading.value = true
+  try {
+    const { data } = await api.get('/api/admin/capture-config')
+    if (data?.ok)
+      localCaptureConfig.value = normalizeCaptureConfig(data.data)
+  }
+  catch (e) {
+    console.error('加载抓包服务配置失败:', e)
+  }
+  finally {
+    captureConfigLoading.value = false
+  }
+}
+
+async function handleTestCaptureConfig() {
+  captureConfigTesting.value = true
+  try {
+    const { data } = await api.post('/api/admin/capture-config/test', {
+      embedded: localCaptureConfig.value.embedded,
+      apiBase: localCaptureConfig.value.apiBase,
+      apiToken: localCaptureConfig.value.apiToken,
+    })
+    if (data?.ok) {
+      const port = data.data?.proxyPort || 18000
+      showAlert(`抓包服务可用，代理端口 ${port}`, 'primary')
+    }
+    else {
+      showAlert(getApiErrorMessage(data, '测试失败'), 'danger')
+    }
+  }
+  catch (e: any) {
+    showAlert(`测试失败: ${getApiErrorMessage(e, '未知错误')}`, 'danger')
+  }
+  finally {
+    captureConfigTesting.value = false
+  }
+}
+
+async function handleSaveCaptureConfig() {
+  if (localCaptureConfig.value.enabled && !localCaptureConfig.value.embedded && !localCaptureConfig.value.apiToken && !localCaptureConfig.value.tokenConfigured) {
+    showAlert('独立模式下启用前请填写 API Token', 'danger')
+    return
+  }
+  captureConfigSaving.value = true
+  try {
+    const { data } = await api.post('/api/admin/capture-config', {
+      enabled: localCaptureConfig.value.enabled,
+      embedded: localCaptureConfig.value.embedded,
+      apiBase: localCaptureConfig.value.apiBase,
+      apiToken: localCaptureConfig.value.apiToken,
+      autoImportQqGids: localCaptureConfig.value.autoImportQqGids,
+    })
+    if (data?.ok)
+      localCaptureConfig.value = normalizeCaptureConfig(data.data)
+    showAlert(data?.ok ? '抓包服务配置已保存' : getApiErrorMessage(data, '保存失败'), data?.ok ? 'primary' : 'danger')
+  }
+  catch (e: any) {
+    showAlert(`保存失败: ${getApiErrorMessage(e, '未知错误')}`, 'danger')
+  }
+  finally {
+    captureConfigSaving.value = false
   }
 }
 
@@ -2293,6 +2384,75 @@ async function handleResetSystemConfig() {
                     @click="handleSaveLoginSettings"
                   >
                     保存登录设置
+                  </BaseButton>
+                </div>
+              </section>
+
+              <section v-if="userStore.isAdmin" class="farm-card rounded-lg p-4">
+                <div class="mb-4 flex items-start gap-3">
+                  <div class="h-9 w-9 flex shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-600 dark:bg-sky-900/25 dark:text-sky-400">
+                    <span class="i-carbon-network-4 text-xl" />
+                  </div>
+                  <div>
+                    <h4 class="text-base text-gray-900 font-bold dark:text-gray-100">
+                      Code/GID 抓取服务
+                    </h4>
+                    <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                      管理员开启后，添加账号可使用手机 HTTP 代理抓包登录；默认关闭，代理端口 18000 仅在抓取会话期间监听
+                    </p>
+                  </div>
+                </div>
+
+                <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <div class="border border-gray-200 rounded-lg bg-gray-50/70 p-3 dark:border-gray-700 dark:bg-gray-900/30">
+                    <BaseSwitch v-model="localCaptureConfig.enabled" label="启用抓包登录" />
+                  </div>
+                  <div class="border border-gray-200 rounded-lg bg-gray-50/70 p-3 dark:border-gray-700 dark:bg-gray-900/30">
+                    <BaseSwitch v-model="localCaptureConfig.embedded" label="嵌入当前进程" />
+                  </div>
+                  <div class="border border-gray-200 rounded-lg bg-gray-50/70 p-3 sm:col-span-2 dark:border-gray-700 dark:bg-gray-900/30">
+                    <BaseSwitch v-model="localCaptureConfig.autoImportQqGids" label="QQ 抓包后自动导入好友 GID" />
+                  </div>
+                </div>
+
+                <div
+                  v-if="!localCaptureConfig.embedded"
+                  class="mt-4 grid grid-cols-1 gap-3 rounded-lg border border-gray-200 bg-gray-50/70 p-4 sm:grid-cols-2 dark:border-gray-700 dark:bg-gray-900/30"
+                >
+                  <BaseInput
+                    v-model="localCaptureConfig.apiBase"
+                    label="独立抓包服务地址"
+                    type="text"
+                    placeholder="http://127.0.0.1:8450"
+                  />
+                  <BaseInput
+                    v-model="localCaptureConfig.apiToken"
+                    label="API Token"
+                    type="password"
+                    :placeholder="localCaptureConfig.tokenConfigured ? '已配置，留空则保持原值' : '独立模式启用前必填'"
+                  />
+                </div>
+
+                <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">
+                  {{ localCaptureConfig.running ? '嵌入式抓包核心已在当前进程运行' : '嵌入式抓包核心未运行' }}
+                </p>
+
+                <div class="mt-3 flex justify-end gap-2 border-t pt-3 dark:border-gray-700">
+                  <BaseButton
+                    variant="secondary"
+                    size="sm"
+                    :loading="captureConfigTesting"
+                    @click="handleTestCaptureConfig"
+                  >
+                    测试连通
+                  </BaseButton>
+                  <BaseButton
+                    variant="primary"
+                    size="sm"
+                    :loading="captureConfigSaving"
+                    @click="handleSaveCaptureConfig"
+                  >
+                    保存抓包设置
                   </BaseButton>
                 </div>
               </section>
